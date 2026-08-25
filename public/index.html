@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>DnD Мастерская Онлайн</title>
+<style>
+  body { margin:0; font-family:Georgia,serif; background:#1e1b16; color:#e8dcc0; display:flex; }
+  #sidebar { width:340px; padding:15px; background:#2a251d; height:100vh; overflow-y:auto; box-sizing:border-box; }
+  #mapArea { flex:1; display:flex; justify-content:center; align-items:center; overflow:auto; }
+  canvas { border:2px solid #6b5b3e; }
+  h2 { color:#d4af37; border-bottom:1px solid #6b5b3e; padding-bottom:5px; font-size:17px; }
+  button { background:#6b5b3e; color:#fff; border:none; padding:8px 12px; margin:3px; border-radius:6px; cursor:pointer; }
+  button:hover { background:#d4af37; color:#1e1b16; }
+  input, select, textarea { background:#1e1b16; color:#e8dcc0; border:1px solid #6b5b3e; padding:6px; border-radius:4px; margin:3px 0; width:95%; }
+  .monster { background:#1e1b16; border:1px solid #6b5b3e; border-radius:8px; padding:10px; margin:8px 0; font-size:13px; }
+  .monster b { color:#d4af37; }
+  .monster img { width:100%; border-radius:6px; margin-top:5px; }
+  #diceResult { font-size:26px; color:#d4af37; text-align:center; min-height:36px; }
+  .log { font-size:12px; color:#9a8c6b; max-height:120px; overflow-y:auto; }
+  .hint { font-size:12px; color:#9a8c6b; }
+  #loader { display:none; color:#d4af37; font-size:13px; }
+  .roomBox { background:#1e1b16; border:1px solid #6b5b3e; border-radius:8px; padding:10px; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2>🚪 Комната</h2>
+  <div class="roomBox">
+    Ты в комнате: <b id="roomName" style="color:#d4af37">—</b><br>
+    <span class="hint">Игроков онлайн: <b id="playersCount">1</b></span><br>
+    <button onclick="copyInvite()">📋 Скопировать ссылку-приглашение</button>
+    <button onclick="newRoom()">➕ Новая комната</button>
+    <button onclick="joinRoom()">🔑 Войти в комнату</button>
+    <button onclick="clearRoom()" style="background:#7a3030">🧹 Сбросить комнату</button>
+  </div>
+
+  <h2>👤 Ты</h2>
+  <input id="playerName" placeholder="Твоё имя" value="Игрок">
+
+  <h2>🎲 Кубики (видят все)</h2>
+  <div>
+    <button onclick="roll(4)">d4</button><button onclick="roll(6)">d6</button>
+    <button onclick="roll(8)">d8</button><button onclick="roll(10)">d10</button>
+    <button onclick="roll(12)">d12</button><button onclick="roll(20)">d20</button>
+    <button onclick="roll(100)">d100</button>
+  </div>
+  <div id="diceResult">—</div>
+  <div class="log" id="diceLog"></div>
+
+  <h2>🗺️ Карта</h2>
+  <textarea id="mapPrompt" rows="2" placeholder="Опиши карту: тёмное подземелье с лавой и мостами..."></textarea>
+  <button onclick="genMap()">✨ Сгенерировать ИИ-карту</button>
+  <div id="loader">⏳ Нейросеть рисует...</div>
+  <label class="hint">Или загрузи свою картинку:</label>
+  <input type="file" id="mapUpload" accept="image/*">
+
+  <h2>🧙 Токены</h2>
+  <input id="tokenName" placeholder="Имя токена">
+  <select id="tokenColor">
+    <option value="#3b7dd8">Синий (игрок)</option>
+    <option value="#d83b3b">Красный (враг)</option>
+    <option value="#3bd86e">Зелёный (союзник)</option>
+    <option value="#d8c43b">Жёлтый (NPC)</option>
+  </select>
+  <button onclick="addToken()">Добавить токен</button>
+  <p class="hint">Перетаскивай токены — все игроки увидят движение. Двойной клик — удалить.</p>
+
+  <h2>👹 Генератор монстров с ИИ-портретом</h2>
+  <select id="monsterLevel">
+    <option value="1">Слабый (ур. 1-3)</option>
+    <option value="2">Средний (ур. 4-7)</option>
+    <option value="3">Сильный (ур. 8-12)</option>
+    <option value="4">Босс (ур. 13+)</option>
+  </select>
+  <button onclick="genMonster()">Сгенерировать монстра</button>
+  <div id="monsters"></div>
+</div>
+
+<div id="mapArea"><canvas id="map" width="900" height="700"></canvas></div>
+
+<script>
+const canvas = document.getElementById('map'), ctx = canvas.getContext('2d');
+const CELL = 50;
+let bgImage = null, tokens = [], dragToken = null;
+
+// === Комнаты ===
+const params = new URLSearchParams(location.search);
+const ROOM = (params.get('room') || 'main').toLowerCase();
+document.getElementById('roomName').textContent = ROOM;
+
+const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+const ws = new WebSocket(proto + location.host + '/?room=' + encodeURIComponent(ROOM));
+
+function copyInvite() {
+  const link = location.origin + '/?room=' + encodeURIComponent(ROOM);
+  navigator.clipboard.writeText(link);
+  alert('Ссылка скопирована:\n' + link + '\nОтправь её друзьям!');
+}
+
+function newRoom() {
+  const words = ['dragon','goblin','wizard','dungeon','sword','rune','troll','crypt'];
+  const name = words[Math.random()*words.length|0] + '-' + (100+Math.random()*900|0);
+  location.href = '/?room=' + name;
+}
+
+function joinRoom() {
+  const name = prompt('Введи название комнаты:');
+  if (name) location.href = '/?room=' + encodeURIComponent(name.trim().toLowerCase());
+}
+
+function clearRoom() {
+  if (confirm('Очистить карту, токены и монстров для ВСЕХ игроков в комнате?'))
+    send({ type: 'clearRoom' });
+}
+
+// === Обработка сообщений сервера ===
+ws.onmessage = e => {
+  const msg = JSON.parse(e.data);
+  if (msg.type === 'state') {
+    tokens = msg.state.tokens;
+    bgImage = null;
+    document.getElementById('monsters').innerHTML = '';
+    if (msg.state.bg) loadBg(msg.state.bg);
+    msg.state.monsters.forEach(m => showMonster(m));
+    draw();
+  }
+  if (msg.type === 'players')
+    document.getElementById('playersCount').textContent = msg.count;
+  if (msg.type === 'setBg') loadBg(msg.bg);
+  if (msg.type === 'addToken') { tokens.push(msg.token); draw(); }
+  if (msg.type === 'moveToken') {
+    const t = tokens.find(t => t.id === msg.id);
+    if (t) { t.x = msg.x; t.y = msg.y; draw(); }
+  }
+  if (msg.type === 'removeToken') { tokens = tokens.filter(t => t.id !== msg.id); draw(); }
+  if (msg.type === 'roll') showRoll(msg);
+  if (msg.type === 'monster') showMonster(msg.monster);
+};
+const send = m => ws.readyState === 1 && ws.send(JSON.stringify(m));
+
+// === ИИ-генерация через Pollinations.ai (бесплатно, без ключей) ===
+function aiImageUrl(prompt, w, h) {
+  return 'https://image.pollinations.ai/prompt/' + encodeURIComponent(prompt) +
+         `?width=${w}&height=${h}&nologo=true&seed=` + (Math.random()*1e6|0);
+}
+
+function genMap() {
+  const desc = document.getElementById('mapPrompt').value || 'фэнтези подземелье';
+  const prompt = 'fantasy DnD battle map, top-down view, ' + desc + ', detailed, grid-friendly';
+  const url = aiImageUrl(prompt, 900, 700);
+  document.getElementById('loader').style.display = 'block';
+  loadBg(url, () => send({ type: 'setBg', bg: url }));
+}
+
+function loadBg(url, cb) {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => { bgImage = img; document.getElementById('loader').style.display='none'; draw(); if (cb) cb(); };
+  img.src = url;
+}
+
+document.getElementById('mapUpload').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => { loadBg(reader.result, () => send({ type:'setBg', bg: reader.result })); };
+  reader.readAsDataURL(f);
+};
+
+// === Отрисовка ===
+function draw() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if (bgImage) ctx.drawImage(bgImage,0,0,canvas.width,canvas.height);
+  else { ctx.fillStyle='#2f4a2f'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+  ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=1;
+  for (let x=0;x<=canvas.width;x+=CELL){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
+  for (let y=0;y<=canvas.height;y+=CELL){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
+  tokens.forEach(t=>{
+    ctx.fillStyle=t.color; ctx.beginPath(); ctx.arc(t.x,t.y,CELL/2-6,0,7); ctx.fill();
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(t.x,t.y,CELL/2-4,0,7); ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.font='12px Georgia'; ctx.textAlign='center';
+    ctx.fillText(t.name, t.x, t.y+CELL/2+12);
+  });
+}
+
+// === Токены ===
+function addToken(name, color) {
+  const token = {
+    id: Date.now() + '' + (Math.random()*1000|0),
+    name: name || document.getElementById('tokenName').value || 'Токен',
+    color: color || document.getElementById('tokenColor').value,
+    x: CELL*1.5, y: CELL*1.5
+  };
+  tokens.push(token); draw();
+  send({ type:'addToken', token });
+}
+
+canvas.onmousedown = e => {
+  const r=canvas.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  dragToken = tokens.slice().reverse().find(t=>Math.hypot(t.x-mx,t.y-my)<CELL/2);
+};
+canvas.onmousemove = e => {
+  if(!dragToken) return;
+  const r=canvas.getBoundingClientRect();
+  dragToken.x=e.clientX-r.left; dragToken.y=e.clientY-r.top; draw();
+  send({ type:'moveToken', id:dragToken.id, x:dragToken.x, y:dragToken.y });
+};
+canvas.onmouseup = () => {
+  if(dragToken){
+    dragToken.x=Math.floor(dragToken.x/CELL)*CELL+CELL/2;
+    dragToken.y=Math.floor(dragToken.y/CELL)*CELL+CELL/2;
+    send({ type:'moveToken', id:dragToken.id, x:dragToken.x, y:dragToken.y });
+    dragToken=null; draw();
+  }
+};
+canvas.ondblclick = e => {
+  const r=canvas.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  const t = tokens.slice().reverse().find(t=>Math.hypot(t.x-mx,t.y-my)<CELL/2);
+  if (t) { tokens = tokens.filter(x=>x.id!==t.id); draw(); send({type:'removeToken', id:t.id}); }
+};
+
+// === Кубики ===
+function roll(sides){
+  const v = 1+Math.floor(Math.random()*sides);
+  const player = document.getElementById('playerName').value || 'Игрок';
+  const msg = { type:'roll', player, sides, value:v };
+  showRoll(msg); send(msg);
+}
+function showRoll(m){
+  document.getElementById('diceResult').textContent = `${m.player}: d${m.sides} → ${m.value}`;
+  const log = document.getElementById('diceLog');
+  log.innerHTML = `${m.player} — d${m.sides}: <b>${m.value}</b><br>` + log.innerHTML;
+}
+
+// === Монстры с ИИ-портретами ===
+const names1=['Гнилой','Теневой','Кровавый','Древний','Ядовитый','Огненный','Ледяной','Проклятый'];
+const names2=['гоблин','орк','скелет','волк','тролль','вампир','дракон','культист','голем','призрак'];
+const abilities=['Укус (1d6)','Когти (2d4)','Огненное дыхание (3d6)','Ядовитое жало (1d8+яд)','Крик ужаса (спасбросок МДР)','Регенерация 5 HP/ход','Невидимость','Призыв прислужника'];
+
+function genMonster(){
+  const lvl=+document.getElementById('monsterLevel').value;
+  const name=names1[Math.random()*names1.length|0]+' '+names2[Math.random()*names2.length|0];
+  const monster = {
+    name,
+    hp:(10+Math.random()*15|0)*lvl,
+    ac:10+lvl*2+(Math.random()*3|0),
+    atk:lvl+2+(Math.random()*3|0),
+    ab:abilities[Math.random()*abilities.length|0],
+    stats:[...Array(6)].map(()=>8+lvl+(Math.random()*6|0)),
+    img: aiImageUrl('dark fantasy monster portrait, ' + name + ', DnD style art', 400, 400)
+  };
+  showMonster(monster);
+  send({ type:'monster', monster });
+}
+
+function showMonster(m){
+  const div = document.createElement('div');
+  div.className='monster';
+  div.innerHTML = `<b>${m.name}</b><br>
+    ❤️ HP: ${m.hp} | 🛡️ AC: ${m.ac} | ⚔️ Атака: +${m.atk}<br>
+    СИЛ ${m.stats[0]} ЛОВ ${m.stats[1]} ТЕЛ ${m.stats[2]} ИНТ ${m.stats[3]} МДР ${m.stats[4]} ХАР ${m.stats[5]}<br>
+    ✨ ${m.ab}<br>
+    <img src="${m.img}" loading="lazy">`;
+  const btn = document.createElement('button');
+  btn.textContent = 'На карту';
+  btn.onclick = () => addToken(m.name, '#d83b3b');
+  div.appendChild(btn);
+  document.getElementById('monsters').prepend(div);
+}
+
+draw();
+</script>
+</body>
+</html>
